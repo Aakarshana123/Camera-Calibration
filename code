@@ -1,0 +1,65 @@
+clc;
+clear;
+close all;
+
+%% Step 1: Load Images from Folder
+imageFolder = 'images';   % Folder containing checkerboard images
+images = imageDatastore(imageFolder);
+
+numImages = numel(images.Files);
+fprintf('Total Images Loaded: %d\n', numImages);
+
+%% Step 2: Detect Checkerboard Corners
+[imagePoints, boardSize, imagesUsed] = detectCheckerboardPoints(images.Files);
+
+fprintf('Valid Checkerboard Images Used: %d\n', sum(imagesUsed));
+
+%% Step 3: Define World Coordinates (Z = 0 plane)
+squareSize = 25; % mm (measure your checkerboard)
+worldPoints = generateCheckerboardPoints(boardSize, squareSize);
+
+%% Step 4: Get Image Size
+I = readimage(images,1);
+imageSize = [size(I,1), size(I,2)];
+
+%% Step 5: Camera Calibration (Zhang Method internally)
+[cameraParams, imagesUsed, estimationErrors] = estimateCameraParameters( ...
+    imagePoints, worldPoints, ...
+    'ImageSize', imageSize);
+
+%% Step 6: Display Intrinsic Parameters
+disp('===== Intrinsic Parameters =====');
+disp(cameraParams.IntrinsicMatrix);
+
+disp('Focal Length:');
+disp(cameraParams.FocalLength);
+
+disp('Principal Point:');
+disp(cameraParams.PrincipalPoint);
+
+disp('Distortion Coefficients:');
+disp(cameraParams.RadialDistortion);
+disp(cameraParams.TangentialDistortion);
+
+%% Step 7: Reprojection Error
+figure;
+showReprojectionErrors(cameraParams);
+title('Reprojection Errors');
+
+%% Step 8: Extrinsics (Camera Pose)
+figure;
+showExtrinsics(cameraParams, 'CameraCentric');
+title('Camera Positions');
+
+%% Step 9: Undistort Sample Image
+I = readimage(images,1);
+undistortedImage = undistortImage(I, cameraParams);
+
+figure;
+imshowpair(I, undistortedImage, 'montage');
+title('Original vs Undistorted');
+
+%% Step 10: Save Parameters (for report/demo)
+save('cameraParameters.mat', 'cameraParams');
+
+fprintf('Calibration Completed Successfully!\n');
