@@ -1,0 +1,187 @@
+clc; clear; close all;
+
+%% ================================
+%% 1. LOAD IMAGES
+%% ================================
+imageFolder ='C:\Users\akars\OneDrive\Pictures\images1';
+images = imageDatastore(imageFolder);
+
+%% ================================
+%% 2. DETECT CHECKERBOARD
+%% ================================
+[imagePoints, boardSize, imagesUsed] = detectCheckerboardPoints(images.Files);
+
+images.Files = images.Files(imagesUsed);
+numImages = size(imagePoints,3);
+
+fprintf('Valid images used: %d\n', numImages);
+fprintf('Board size detected: [%d %d]\n', boardSize);
+
+if numImages < 3
+    error('Need at least 3 valid images.');
+end
+
+%% ================================
+%% 3. WORLD POINTS
+%% ================================
+squareSize = 5; % cm
+worldPoints = generateCheckerboardPoints(boardSize, squareSize);
+numPoints = size(worldPoints,1);
+
+%% ================================
+%% 4. NORMALIZATION FUNCTION
+%% ================================
+normalize = @(pts) deal( ...
+    ((pts - mean(pts)) * (sqrt(2)/mean(sqrt(sum((pts-mean(pts)).^2,2))))), ...
+    [sqrt(2)/mean(sqrt(sum((pts-mean(pts)).^2,2))) 0 -mean(pts(:,1))*sqrt(2)/mean(sqrt(sum((pts-mean(pts)).^2,2))); ...
+     0 sqrt(2)/mean(sqrt(sum((pts-mean(pts)).^2,2))) -mean(pts(:,2))*sqrt(2)/mean(sqrt(sum((pts-mean(pts)).^2,2))); ...
+     0 0 1]);
+
+%% ================================
+%% 5. HOMOGRAPHY (STABLE)
+%% ================================
+H_all = cell(numImages,1);
+
+for i = 1:numImages
+    
+    imgPts = imagePoints(:,:,i);
+    
+    [normImgPts, T] = normalize(imgPts);
+    [normWorldPts, U] = normalize(worldPoints);
+    
+    L = [];
+    
+    for j = 1:numPoints
+        X = normWorldPts(j,1);
+        Y = normWorldPts(j,2);
+        u = normImgPts(j,1);
+        v = normImgPts(j,2);
+        
+        L = [L;
+            X Y 1 0 0 0 -u*X -u*Y -u;
+            0 0 0 X Y 1 -v*X -v*Y -v];
+    end
+    
+    [~,~,V] = svd(L);
+    h = V(:,end);
+    
+    Hn = reshape(h,3,3)';
+    
+    % Denormalization
+    H = inv(T) * Hn * U;
+    H = H / H(3,3);
+    
+    H_all{i} = H;
+end
+
+%% ================================
+%% 6. BUILD V MATRIX
+%% ================================
+V = [];
+
+for i = 1:numImages
+    H = H_all{i};
+    
+    v12 = [
+        H(1,1)*H(1,2);
+        H(1,1)*H(2,2)+H(2,1)*H(1,2);
+        H(2,1)*H(2,2);
+        H(3,1)*H(1,2)+H(1,1)*H(3,2);
+        H(3,1)*H(2,2)+H(2,1)*H(3,2);
+        H(3,1)*H(3,2)
+    ];
+    
+    v11 = [
+        H(1,1)^2;
+        2*H(1,1)*H(2,1);
+        H(2,1)^2;
+        2*H(3,1)*H(1,1);
+        2*H(3,1)*H(2,1);
+        H(3,1)^2
+    ];
+    
+    v22 = [
+        H(1,2)^2;
+        2*H(1,2)*H(2,2);
+        H(2,2)^2;
+        2*H(3,2)*H(1,2);
+        2*H(3,2)*H(2,2);
+        H(3,2)^2
+    ];
+    
+    V = [V; v12'; (v11 - v22)'];
+end
+
+%% ================================
+%% 7. SOLVE FOR INTRINSIC
+%% ================================
+[~,~,VV] = svd(V);
+b = VV(:,end);
+
+B11 = b(1); B12 = b(2); B22 = b(3);
+B13 = b(4); B23 = b(5); B33 = b(6);
+
+v0 = (B12*B13 - B11*B23)/(B11*B22 - B12^2);
+lambda = B33 - (B13^2 + v0*(B12*B13 - B11*B23))/B11;
+
+alpha = sqrt(abs(lambda/B11));
+beta  = sqrt(abs(lambda*B11/(B11*B22 - B12^2)));
+
+gamma = -B12*alpha^2*beta/lambda;
+u0 = gamma*v0/beta - B13*alpha^2/lambda;
+
+A = [alpha gamma u0;
+     0     beta  v0;
+     0     0     1];
+
+disp('Manual Zhang Intrinsic Matrix:');
+disp(A);
+
+%% ================================
+%% 8. EXTRINSIC PARAMETERS
+%% ================================
+invA = inv(A);
+
+for i = 1:numImages
+    
+    H = H_all{i};
+    
+    lambda = 1 / norm(invA * H(:,1));
+    
+    r1 = lambda * invA * H(:,1);
+    r2 = lambda * invA * H(:,2);
+    r3 = cross(r1,r2);
+    t  = lambda * invA * H(:,3);
+    
+    R = [r1 r2 r3];
+    
+    fprintf('\nImage %d:\n', i);
+    disp('Rotation Matrix:');
+    disp(R);
+    disp('Translation Vector:');
+    disp(t);
+end
+
+%% ================================
+%% 9. MATLAB BUILT-IN (REFERENCE)
+%% ================================
+I = readimage(images,1);
+imageSize = [size(I,1), size(I,2)];
+
+cameraParams = estimateCameraParameters(imagePoints, worldPoints, ...
+    'ImageSize', imageSize);
+
+disp('MATLAB Intrinsic Matrix:');
+disp(cameraParams.IntrinsicMatrix');
+
+figure;
+showReprojectionErrors(cameraParams);
+
+figure;
+showExtrinsics(cameraParams);
+
+J = undistortImage(I, cameraParams);
+
+figure;
+imshowpair(I,J,'montage');
+title('Original vs Undistorted');
